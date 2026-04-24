@@ -47,6 +47,18 @@ type Config struct {
 		RecoveryThreshold int      `yaml:"recovery_threshold"` // 恢复交易所需的正常币种数量，默认3
 	} `yaml:"risk_control"`
 
+	// 下跌趋势保护配置（单币种趋势检测，避免追跌）
+	DowntrendProtection struct {
+		Enabled               bool    `yaml:"enabled"`                  // 是否启用，默认true
+		EMAShort              int     `yaml:"ema_short"`                // 短期EMA周期，默认10
+		EMALong               int     `yaml:"ema_long"`                 // 长期EMA周期，默认30
+		DropThresholdPercent  float64 `yaml:"drop_threshold_percent"`   // 触发暂停的跌幅百分比，默认3.0%
+		StabilizeCandles      int     `yaml:"stabilize_candles"`        // 无新低的K线数判定稳定，默认12
+		RangeThresholdPercent float64 `yaml:"range_threshold_percent"`  // 波动区间收窄阈值，默认1.5%
+		CandleInterval        string  `yaml:"candle_interval"`          // K线周期，默认"15m"
+		MaxFilledPositions    int     `yaml:"max_filled_positions"`     // 最大持仓数量限制，默认0(不限制)
+	} `yaml:"downtrend_protection"`
+
 	// 时间间隔配置（单位：秒，除非特别说明）
 	Timing struct {
 		// WebSocket相关
@@ -199,6 +211,30 @@ func (c *Config) Validate() error {
 	} else if c.RiskControl.RecoveryThreshold > monitorCount {
 		c.RiskControl.RecoveryThreshold = monitorCount // 最大为监控币种数量
 	}
+
+	// 验证下跌趋势保护配置并设置默认值
+	if c.DowntrendProtection.EMAShort <= 0 {
+		c.DowntrendProtection.EMAShort = 10 // 默认10
+	}
+	if c.DowntrendProtection.EMALong <= 0 {
+		c.DowntrendProtection.EMALong = 30 // 默认30
+	}
+	if c.DowntrendProtection.EMAShort >= c.DowntrendProtection.EMALong {
+		c.DowntrendProtection.EMALong = c.DowntrendProtection.EMAShort + 20 // 确保长期EMA > 短期EMA
+	}
+	if c.DowntrendProtection.DropThresholdPercent <= 0 {
+		c.DowntrendProtection.DropThresholdPercent = 3.0 // 默认3%
+	}
+	if c.DowntrendProtection.StabilizeCandles <= 0 {
+		c.DowntrendProtection.StabilizeCandles = 12 // 默认12根K线
+	}
+	if c.DowntrendProtection.RangeThresholdPercent <= 0 {
+		c.DowntrendProtection.RangeThresholdPercent = 1.5 // 默认1.5%
+	}
+	if c.DowntrendProtection.CandleInterval == "" {
+		c.DowntrendProtection.CandleInterval = "15m" // 默认15分钟
+	}
+	// MaxFilledPositions 默认为0，表示不限制
 
 	return nil
 }

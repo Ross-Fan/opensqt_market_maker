@@ -115,7 +115,7 @@ system:
 # 主动安全风控配置（基于移动平均线）
 risk_control:
   enabled: true               # 是否启用风控（默认开启true,关闭用false）
-  
+
   # 监控的主流币种（用于判断市场整体情绪）
   monitor_symbols:
     - "BTCUSDT"
@@ -123,11 +123,46 @@ risk_control:
     - "SOLUSDT"
     - "XRPUSDT"
     - "DOGEUSDT"
-  
+
   interval: "1m"              # K线周期：1m / 3m / 5m
   volume_multiplier: 3.0      # 成交量倍数：当前量 > 均值×3倍视为异常
   average_window: 20          # 移动平均窗口：50根K线
   recovery_threshold: 3       # 恢复交易所需的正常币种数量（默认3个币种恢复正常即可恢复交易）
-  
+
   # 触发条件：当前价格 < 移动均价 且 成交量 > 均值×倍数
   # 解除条件：至少 recovery_threshold 个币种满足（当前价格 > 移动均价 且 成交量 < 均值×倍数）
+
+# 下跌趋势保护配置（单币种趋势检测，避免追跌）
+# 功能：检测交易币种的下跌趋势，在下跌过程中暂停买入，待价格稳定后自动恢复交易
+# 与 risk_control 的区别：
+#   - risk_control: 监控多个主流币种，判断整体市场情绪（全市场崩盘保护）
+#   - downtrend_protection: 只监控交易币种本身，检测单币种的下跌趋势（避免追跌）
+downtrend_protection:
+  enabled: true               # 是否启用下跌趋势保护（默认开启true,关闭用false）
+
+  # EMA参数：用于趋势判断
+  ema_short: 10               # 短期EMA周期（快线），默认10
+  ema_long: 30                # 长期EMA周期（慢线），默认30
+
+  # 触发条件
+  drop_threshold_percent: 3.0 # 从近期高点跌幅超过此百分比触发暂停买入，默认3%
+
+  # 稳定检测参数
+  stabilize_candles: 12       # 无新低的K线数量判定为稳定，默认12根
+  range_threshold_percent: 1.5 # 价格波动区间收窄至此百分比以下视为稳定，默认1.5%
+  candle_interval: "15m"      # K线周期，建议用15m或5m，默认15m
+
+  # 持仓限制（可选，防止过度累积持仓）
+  max_filled_positions: 0     # 最大持仓槽位数量，0表示不限制
+
+  # 工作原理：
+  # 1. 价格从高点下跌超过 drop_threshold_percent% 且 价格低于EMA短线 → 触发暂停买入
+  # 2. 暂停期间只挂卖单，不新增买单，已有买单会被撤销
+  # 3. 当价格稳定（连续 stabilize_candles 根K线未创新低 且 波动<range_threshold_percent%）→ 恢复买入
+  # 4. 恢复时在当前价格重新锚定网格，不等待价格回到原高点
+
+  # 示例场景（SOL从89跌到84）：
+  # - 价格89 → 86（跌3.4%）→ 触发暂停买入
+  # - 价格继续跌到84 → 保持暂停，不买入（避免损失）
+  # - 价格在84附近波动12根15分钟K线，波动<1.5% → 判定稳定
+  # - 在84附近恢复交易，重新开始网格（不等待涨回89）

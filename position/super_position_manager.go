@@ -160,6 +160,9 @@ type SuperPositionManager struct {
 	// 初始化标志
 	isInitialized atomic.Bool
 
+	// 买入禁用标志（下跌趋势保护使用）
+	buyingDisabled atomic.Bool
+
 	mu sync.RWMutex // 全局锁（用于关键操作）
 }
 
@@ -357,6 +360,12 @@ func (spm *SuperPositionManager) AdjustOrders(currentPrice float64) error {
 	allowedNewBuyOrders := buyWindowSize
 	if allowedNewBuyOrders > remainingOrders {
 		allowedNewBuyOrders = remainingOrders
+	}
+
+	// 🔥 检查买入禁用标志（下跌趋势保护）
+	isBuyingDisabled := spm.buyingDisabled.Load()
+	if isBuyingDisabled {
+		allowedNewBuyOrders = 0 // 禁用买入时不创建新买单
 	}
 
 	// 1. 处理买单
@@ -651,6 +660,14 @@ func (spm *SuperPositionManager) AdjustOrders(currentPrice float64) error {
 	}
 
 	return nil
+}
+
+// AdjustOrdersWithBuyingDisabled 调整订单但禁用买入（下跌趋势保护时使用）
+// 只处理卖单，不创建新的买单
+func (spm *SuperPositionManager) AdjustOrdersWithBuyingDisabled(currentPrice float64) error {
+	spm.buyingDisabled.Store(true)
+	defer spm.buyingDisabled.Store(false)
+	return spm.AdjustOrders(currentPrice)
 }
 
 // OnOrderUpdate 订单更新回调（异步订单同步流）

@@ -134,6 +134,9 @@ func main() {
 	// === 新增：初始化风控监视器 ===
 	riskMonitor := safety.NewRiskMonitor(cfg, ex)
 
+	// === 新增：初始化下跌趋势保护 ===
+	downtrendProtection := safety.NewDowntrendProtection(cfg, ex, cfg.Trading.Symbol)
+
 	// === 创建对账器（从仓位管理器剖离） ===
 	reconciler := safety.NewReconciler(cfg, exchangeAdapter, superPositionManager)
 	// 将风控状态注入到对账器，用于暂停对账日志
@@ -236,30 +239,58 @@ func main() {
 	// 启动风控监控
 	go riskMonitor.Start(ctx)
 
+	// 启动下跌趋势保护
+	go downtrendProtection.Start(ctx)
+
 	// 10. 监听价格变化,调整订单窗口（实时调整，不打印价格变化日志）
 	go func() {
 		priceCh := priceMonitor.Subscribe()
-		var lastTriggered bool // 记录上一次的风控状态，用于检测状态切换
+		var lastRiskTriggered bool      // 记录上一次的风控状态，用于检测状态切换
+		var lastDowntrendTriggered bool // 记录上一次的下跌趋势保护状态
 
 		for priceChange := range priceCh {
-			// === 风控检查：触发时撤销所有买单并暂停交易 ===
-			isTriggered := riskMonitor.IsTriggered()
+			// === 第一层风控：全市场风控检查 ===
+			isRiskTriggered := riskMonitor.IsTriggered()
 
-			if isTriggered {
+			if isRiskTriggered {
 				// 检测状态切换：从未触发 -> 触发（首次触发）
-				if !lastTriggered {
+				if !lastRiskTriggered {
 					logger.Warn("🚨 [风控触发] 市场异常，正在撤销所有买单并暂停交易...")
 					superPositionManager.CancelAllBuyOrders() // 🔥 只撤销买单，保留卖单
-					lastTriggered = true
+					lastRiskTriggered = true
 				}
 				// 风控触发期间跳过后续下单逻辑
 				continue
 			}
 
 			// 检测状态切换：从触发 -> 未触发（风控解除）
-			if lastTriggered {
+			if lastRiskTriggered {
 				logger.Info("✅ [风控解除] 市场恢复正常，恢复自动交易")
-				lastTriggered = false
+				lastRiskTriggered = false
+			}
+
+			// === 第二层风控：下跌趋势保护检查 ===
+			allowBuying, reason := downtrendProtection.ShouldAllowBuying()
+
+			if !allowBuying {
+				// 检测状态切换：从允许 -> 不允许（首次触发）
+				if !lastDowntrendTriggered {
+					logger.Warn("📉 [下跌趋势保护] 暂停买入: %s", reason)
+					superPositionManager.CancelAllBuyOrders() // 撤销所有买单
+					lastDowntrendTriggered = true
+				}
+				// 下跌保护触发期间，仍然调用AdjustOrders但不会创建新买单
+				// 让系统继续处理卖单
+				if err := superPositionManager.AdjustOrdersWithBuyingDisabled(priceChange.NewPrice); err != nil {
+					logger.Error("❌ 调整订单失败: %v", err)
+				}
+				continue
+			}
+
+			// 检测状态切换：从不允许 -> 允许（下跌保护解除）
+			if lastDowntrendTriggered {
+				logger.Info("✅ [下跌趋势保护解除] 价格稳定，恢复买入")
+				lastDowntrendTriggered = false
 			}
 
 			// 实时调整订单，不打印价格变化日志（避免日志过多）
@@ -321,6 +352,9 @@ func main() {
 
 	logger.Info("⏹️ 正在停止风控监视器...")
 	riskMonitor.Stop()
+
+	logger.Info("⏹️ 正在停止下跌趋势保护...")
+	downtrendProtection.Stop()
 
 	// 等待一小段时间，让协程完成清理（避免强制退出导致日志丢失）
 	time.Sleep(500 * time.Millisecond)
