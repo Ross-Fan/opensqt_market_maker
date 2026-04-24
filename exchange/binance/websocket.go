@@ -162,13 +162,13 @@ func (w *WebSocketManager) StartPriceStream(ctx context.Context, symbol string, 
 		}
 	}()
 
-	// 等待接收首个价格（最多10秒）
+	// 等待接收首个价格（最多20秒）
 	select {
 	case <-firstPriceCh:
 		logger.Debug("✅ [Binance] 价格流已启动: %s@aggTrade", symbolLower)
 		return nil
-	case <-time.After(10 * time.Second):
-		return fmt.Errorf("等待首个价格超时（10秒）")
+	case <-time.After(20 * time.Second):
+		return fmt.Errorf("等待首个价格超时（20秒）")
 	case <-ctx.Done():
 		return fmt.Errorf("上下文已取消")
 	}
