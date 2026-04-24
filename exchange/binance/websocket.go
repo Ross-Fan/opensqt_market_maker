@@ -86,7 +86,7 @@ func (w *WebSocketManager) StartPriceStream(ctx context.Context, symbol string, 
 	// 格式: wss://fstream.binance.com/ws/<symbol>@aggTrade
 
 	symbolLower := strings.ToLower(symbol)
-	url := fmt.Sprintf("wss://fstream.binance.com/ws/%s@aggTrade", symbolLower)
+	url := fmt.Sprintf("wss://stream.binance.com:9443/ws/%s@aggTrade", symbolLower)
 
 	// 使用通道等待首个价格
 	firstPriceCh := make(chan struct{})

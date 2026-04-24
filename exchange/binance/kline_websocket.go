@@ -87,7 +87,7 @@ func (k *KlineWebSocketManager) connectLoop(ctx context.Context) {
 		for i, symbol := range k.symbols {
 			streams[i] = fmt.Sprintf("%s@kline_%s", strings.ToLower(symbol), k.interval)
 		}
-		wsURL := fmt.Sprintf("wss://fstream.binance.com/stream?streams=%s", strings.Join(streams, "/"))
+		wsURL := fmt.Sprintf("wss://stream.binance.com:9443/stream?streams=%s", strings.Join(streams, "/"))
 
 		logger.Info("🔗 正在连接 Binance K线WebSocket...")
 
