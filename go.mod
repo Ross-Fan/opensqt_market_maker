@@ -3,7 +3,7 @@ module opensqt
 go 1.25.4
 
 require (
-	github.com/adshao/go-binance/v2 v2.8.7
+	github.com/adshao/go-binance/v2 v2.8.11
 	github.com/gorilla/websocket v1.5.3
 	golang.org/x/time v0.14.0
 	gopkg.in/yaml.v3 v3.0.1

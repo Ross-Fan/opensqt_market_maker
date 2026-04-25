@@ -18,7 +18,7 @@ type OrderUpdateCallback func(update OrderUpdate)
 type GateAdapter struct {
 	client         *Client
 	wsManager      *WebSocketManager
-	klineWSManager *KlineWebSocketManager
+	klineManagers  map[string]*KlineWebSocketManager // key: interval
 	symbol         string // 交易对（如 BTCUSDT）
 	gateSymbol     string // Gate格式（如 BTC_USDT）
 	settle         string // 结算币种：usdt 或 btc
@@ -667,17 +667,22 @@ func (g *GateAdapter) GetHistoricalKlines(ctx context.Context, symbol string, in
 }
 
 // StartKlineStream 启动K线流
+// 每个 interval 使用独立的 KlineWebSocketManager，支持多个调用方并发订阅不同周期
 func (g *GateAdapter) StartKlineStream(ctx context.Context, symbols []string, interval string, callback func(interface{})) error {
-	if g.klineWSManager == nil {
-		g.klineWSManager = NewKlineWebSocketManager(g.settle)
+	if g.klineManagers == nil {
+		g.klineManagers = make(map[string]*KlineWebSocketManager)
 	}
-	return g.klineWSManager.Start(ctx, symbols, interval, callback)
+	if _, exists := g.klineManagers[interval]; !exists {
+		g.klineManagers[interval] = NewKlineWebSocketManager(g.settle)
+	}
+	return g.klineManagers[interval].Start(ctx, symbols, interval, callback)
 }
 
-// StopKlineStream 停止K线流
+// StopKlineStream 停止所有K线流
 func (g *GateAdapter) StopKlineStream() {
-	if g.klineWSManager != nil {
-		g.klineWSManager.Stop()
+	for interval, mgr := range g.klineManagers {
+		mgr.Stop()
+		delete(g.klineManagers, interval)
 	}
 }
 

@@ -104,7 +104,7 @@ type OrderUpdateCallback func(update OrderUpdate)
 type BitgetAdapter struct {
 	client         *Client
 	wsManager      *WebSocketManager
-	klineWSManager *KlineWebSocketManager
+	klineManagers  map[string]*KlineWebSocketManager // key: interval
 	symbol         string // 交易对（如 ETHUSDT，V2 API 不带 _UMCBL 后缀）
 	useWebSocket   bool   // 是否使用 WebSocket 下单
 
@@ -950,17 +950,22 @@ func (b *BitgetAdapter) StartPriceStream(ctx context.Context, symbol string, cal
 }
 
 // StartKlineStream 启动K线流（WebSocket）
+// 每个 interval 使用独立的 KlineWebSocketManager，支持多个调用方并发订阅不同周期
 func (b *BitgetAdapter) StartKlineStream(ctx context.Context, symbols []string, interval string, callback func(candle interface{})) error {
-	if b.klineWSManager == nil {
-		b.klineWSManager = NewKlineWebSocketManager()
+	if b.klineManagers == nil {
+		b.klineManagers = make(map[string]*KlineWebSocketManager)
 	}
-	return b.klineWSManager.Start(ctx, symbols, interval, callback)
+	if _, exists := b.klineManagers[interval]; !exists {
+		b.klineManagers[interval] = NewKlineWebSocketManager()
+	}
+	return b.klineManagers[interval].Start(ctx, symbols, interval, callback)
 }
 
-// StopKlineStream 停止K线流
+// StopKlineStream 停止所有K线流
 func (b *BitgetAdapter) StopKlineStream() error {
-	if b.klineWSManager != nil {
-		b.klineWSManager.Stop()
+	for interval, mgr := range b.klineManagers {
+		mgr.Stop()
+		delete(b.klineManagers, interval)
 	}
 	return nil
 }

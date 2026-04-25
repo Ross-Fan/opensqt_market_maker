@@ -110,7 +110,7 @@ type BinanceAdapter struct {
 	client           *futures.Client
 	symbol           string
 	wsManager        *WebSocketManager
-	klineWSManager   *KlineWebSocketManager
+	klineManagers    map[string]*KlineWebSocketManager // key: interval
 	priceDecimals    int    // 价格精度（小数位数）
 	quantityDecimals int    // 数量精度（小数位数）
 	baseAsset        string // 基础资产（交易币种），如 BTC
@@ -563,17 +563,22 @@ func (b *BinanceAdapter) StartPriceStream(ctx context.Context, symbol string, ca
 }
 
 // StartKlineStream 启动K线流（WebSocket）
+// 每个 interval 使用独立的 KlineWebSocketManager，支持多个调用方并发订阅不同周期
 func (b *BinanceAdapter) StartKlineStream(ctx context.Context, symbols []string, interval string, callback func(candle interface{})) error {
-	if b.klineWSManager == nil {
-		b.klineWSManager = NewKlineWebSocketManager()
+	if b.klineManagers == nil {
+		b.klineManagers = make(map[string]*KlineWebSocketManager)
 	}
-	return b.klineWSManager.Start(ctx, symbols, interval, callback)
+	if _, exists := b.klineManagers[interval]; !exists {
+		b.klineManagers[interval] = NewKlineWebSocketManager()
+	}
+	return b.klineManagers[interval].Start(ctx, symbols, interval, callback)
 }
 
-// StopKlineStream 停止K线流
+// StopKlineStream 停止所有K线流
 func (b *BinanceAdapter) StopKlineStream() error {
-	if b.klineWSManager != nil {
-		b.klineWSManager.Stop()
+	for interval, mgr := range b.klineManagers {
+		mgr.Stop()
+		delete(b.klineManagers, interval)
 	}
 	return nil
 }
