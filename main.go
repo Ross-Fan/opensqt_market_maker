@@ -249,6 +249,31 @@ func main() {
 		var lastDowntrendTriggered bool // 记录上一次的下跌趋势保护状态
 
 		for priceChange := range priceCh {
+			// === 趋势自适应网格参数更新（在风控检查之前执行，始终更新） ===
+			// 根据 EMA10/EMA30 趋势强度，动态调整网格间距和交易窗口
+			// 上涨趋势：缩小间距 + 放大买入窗口（多买多赚）
+			// 下跌趋势：放大间距 + 缩小买入窗口（少买少亏）+ 缩小止盈目标（快跑）
+			trendStrength := downtrendProtection.GetTrendStrength()
+			taCfg := cfg.DowntrendProtection.TrendAdaptive
+			if taCfg.Enabled {
+				var mult position.TrendMultipliers
+				if trendStrength >= 0 {
+					// 上涨趋势：密集买入，正常止盈，激进窗口
+					mult.BuySpacing = 1.0 - trendStrength*(1.0-taCfg.BuySpacingMultMin)
+					mult.SellTarget = 1.0 + trendStrength*(taCfg.SellTargetMultMax-1.0)
+					mult.BuyWindow = 1.0 + trendStrength*(taCfg.BuyWindowMultMax-1.0)
+					mult.SellWindow = 1.0 - trendStrength*(1.0-taCfg.SellWindowMultMin)
+				} else {
+					// 下跌趋势：稀疏买入，小利就跑，保守窗口
+					strength := -trendStrength
+					mult.BuySpacing = 1.0 + strength*(taCfg.BuySpacingMultMax-1.0)
+					mult.SellTarget = 1.0 - strength*(1.0-taCfg.SellTargetMultMin)
+					mult.BuyWindow = 1.0 - strength*(1.0-taCfg.BuyWindowMultMin)
+					mult.SellWindow = 1.0 + strength*(taCfg.SellWindowMultMax-1.0)
+				}
+				superPositionManager.SetTrendParams(mult)
+			}
+
 			// === 第一层风控：全市场风控检查 ===
 			isRiskTriggered := riskMonitor.IsTriggered()
 

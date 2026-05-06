@@ -128,6 +128,15 @@ type IExchange interface {
 	CancelAllOrders(ctx context.Context, symbol string) error // 取消所有订单
 }
 
+// TrendMultipliers 趋势自适应网格乘数
+// 根据市场趋势强度动态调整网格参数
+type TrendMultipliers struct {
+	BuySpacing  float64 // 买入间距乘数 (default 1.0, uptrend < 1, downtrend > 1)
+	SellTarget  float64 // 卖出利润目标乘数 (default 1.0, downtrend < 1, uptrend > 1)
+	BuyWindow   float64 // 买入窗口乘数 (default 1.0, uptrend > 1, downtrend < 1)
+	SellWindow  float64 // 卖出窗口乘数 (default 1.0, downtrend > 1, uptrend < 1)
+}
+
 // SuperPositionManager 超级仓位管理器
 type SuperPositionManager struct {
 	config   *config.Config
@@ -163,6 +172,9 @@ type SuperPositionManager struct {
 	// 买入禁用标志（下跌趋势保护使用）
 	buyingDisabled atomic.Bool
 
+	// 趋势自适应网格乘数
+	trendMultipliers atomic.Value // TrendMultipliers
+
 	mu sync.RWMutex // 全局锁（用于关键操作）
 }
 
@@ -186,7 +198,19 @@ func NewSuperPositionManager(cfg *config.Config, executor OrderExecutorInterface
 	spm.totalSellQty.Store(0.0)
 	spm.lastReconcileTime.Store(time.Now())
 	spm.lastMarketPrice.Store(0.0)
+	spm.trendMultipliers.Store(TrendMultipliers{BuySpacing: 1.0, SellTarget: 1.0, BuyWindow: 1.0, SellWindow: 1.0})
 	return spm
+}
+
+// SetTrendParams 设置趋势自适应网格乘数
+// 由 main loop 根据趋势强度定期更新
+func (spm *SuperPositionManager) SetTrendParams(mult TrendMultipliers) {
+	spm.trendMultipliers.Store(mult)
+}
+
+// getTrendParams 获取当前的趋势乘数（内部使用）
+func (spm *SuperPositionManager) getTrendParams() TrendMultipliers {
+	return spm.trendMultipliers.Load().(TrendMultipliers)
 }
 
 // Initialize 初始化管理器（设置价格锚点并创建初始槽位）
@@ -208,8 +232,8 @@ func (spm *SuperPositionManager) Initialize(initialPrice float64, initialPriceSt
 	initialGridPrice := spm.anchorPrice
 	logger.Info("✅ 初始网格价格: %s (使用锚点价格)", formatPrice(initialGridPrice, spm.priceDecimals))
 
-	// 4. 使用统一的槽位价格计算方法创建初始槽位
-	slotPrices := spm.calculateSlotPrices(initialGridPrice, spm.config.Trading.BuyWindowSize, "down")
+	// 4. 使用统一的槽位价格计算方法创建初始槽位（初始化时使用基础间距）
+	slotPrices := spm.calculateSlotPrices(initialGridPrice, spm.config.Trading.BuyWindowSize, "down", spm.config.Trading.PriceInterval)
 	for _, price := range slotPrices {
 		spm.getOrCreateSlot(price)
 	}
@@ -312,13 +336,24 @@ func (spm *SuperPositionManager) AdjustOrders(currentPrice float64) error {
 	sellWindowSize := spm.config.Trading.SellWindowSize
 	priceInterval := spm.config.Trading.PriceInterval
 
-	// 动态计算网格价格
-	currentGridPrice := spm.findNearestGridPrice(currentPrice)
-	// logger.Debug("🔄 [实时调整] 当前价格: %s, 网格价格: %s, 买单窗口: %d, 卖单窗口: %d",
-	// 	formatPrice(currentPrice, spm.priceDecimals), formatPrice(currentGridPrice, spm.priceDecimals), buyWindowSize, sellWindowSize)
+	// 加载趋势自适应乘数
+	trendMults := spm.getTrendParams()
+	effectiveBuySpacing := priceInterval * trendMults.BuySpacing
+	effectiveBuyWindow := int(float64(buyWindowSize) * trendMults.BuyWindow)
+	effectiveSellWindow := int(float64(sellWindowSize) * trendMults.SellWindow)
+	effectiveSellTarget := priceInterval * trendMults.SellTarget
+	if effectiveBuyWindow < 1 {
+		effectiveBuyWindow = 1
+	}
+	if effectiveSellWindow < 1 {
+		effectiveSellWindow = 1
+	}
 
-	// 计算当前网格价格下方buy_window_size个价格
-	slotPrices := spm.calculateSlotPrices(currentGridPrice, buyWindowSize, "down")
+	// 动态计算网格价格（使用有效买入间距）
+	currentGridPrice := spm.findNearestGridPrice(currentPrice, effectiveBuySpacing)
+
+	// 计算当前网格价格下方N个价格（使用有效买入间距和有效窗口）
+	slotPrices := spm.calculateSlotPrices(currentGridPrice, effectiveBuyWindow, "down", effectiveBuySpacing)
 
 	var ordersToPlace []*OrderRequest
 	var activeBuyOrdersInWindow int
@@ -356,8 +391,8 @@ func (spm *SuperPositionManager) AdjustOrders(currentPrice float64) error {
 		remainingOrders = 0
 	}
 
-	// 买单允许的新增数量
-	allowedNewBuyOrders := buyWindowSize
+	// 买单允许的新增数量（使用有效买入窗口）
+	allowedNewBuyOrders := effectiveBuyWindow
 	if allowedNewBuyOrders > remainingOrders {
 		allowedNewBuyOrders = remainingOrders
 	}
@@ -441,7 +476,8 @@ func (spm *SuperPositionManager) AdjustOrders(currentPrice float64) error {
 	}
 
 	// 2. 处理卖单
-	sellWindowMaxPrice := currentPrice + float64(sellWindowSize)*priceInterval
+	// 使用有效卖出窗口和基础间距来计算卖出范围边界
+	sellWindowMaxPrice := currentPrice + float64(effectiveSellWindow)*priceInterval
 	sellWindowMaxPrice = roundPrice(sellWindowMaxPrice, spm.priceDecimals)
 
 	type sellCandidate struct {
@@ -464,7 +500,7 @@ func (spm *SuperPositionManager) AdjustOrders(currentPrice float64) error {
 			slot.OrderID == 0 &&
 			slot.ClientOID == "" {
 
-			sellPrice := slotPrice + priceInterval
+			sellPrice := slotPrice + effectiveSellTarget
 			sellPrice = roundPrice(sellPrice, spm.priceDecimals)
 
 			// 窗口检查
@@ -503,7 +539,7 @@ func (spm *SuperPositionManager) AdjustOrders(currentPrice float64) error {
 		remainingOrdersForSell = 0
 	}
 
-	allowedNewSellOrders := sellWindowSize
+	allowedNewSellOrders := effectiveSellWindow
 	if allowedNewSellOrders > remainingOrdersForSell {
 		allowedNewSellOrders = remainingOrdersForSell
 	}
@@ -850,13 +886,16 @@ func (spm *SuperPositionManager) getOrCreateSlot(price float64) *InventorySlot {
 
 // findNearestGridPrice 找到最近的网格价格
 // 根据当前价格动态计算最近的网格对齐价格
-func (spm *SuperPositionManager) findNearestGridPrice(currentPrice float64) float64 {
+func (spm *SuperPositionManager) findNearestGridPrice(currentPrice float64, buySpacing float64) float64 {
+	if buySpacing <= 0 {
+		buySpacing = spm.config.Trading.PriceInterval
+	}
 	// 计算当前价格相对于锚点的偏移量
 	offset := currentPrice - spm.anchorPrice
 	// 计算离当前价格最近的网格间隔数（四舍五入）
-	intervals := math.Round(offset / spm.config.Trading.PriceInterval)
+	intervals := math.Round(offset / buySpacing)
 	// 计算最近的网格价格
-	gridPrice := spm.anchorPrice + intervals*spm.config.Trading.PriceInterval
+	gridPrice := spm.anchorPrice + intervals*buySpacing
 	// 使用检测到的价格精度进行舍入
 	return roundPrice(gridPrice, spm.priceDecimals)
 }
@@ -867,20 +906,23 @@ func (spm *SuperPositionManager) findNearestGridPrice(currentPrice float64) floa
 //   - gridPrice: 网格价格（使用锚点价格）
 //   - count: 需要计算的槽位数量
 //   - direction: 方向，"down"表示向下（买单），"up"表示向上（卖单）
+//   - spacing: 间距，如果<=0则使用配置中的PriceInterval
 //
 // 返回：槽位价格列表，从网格价格开始，按价格间隔递减或递增，使用检测到的价格精度
-func (spm *SuperPositionManager) calculateSlotPrices(gridPrice float64, count int, direction string) []float64 {
+func (spm *SuperPositionManager) calculateSlotPrices(gridPrice float64, count int, direction string, spacing float64) []float64 {
 	var prices []float64
-	priceInterval := spm.config.Trading.PriceInterval
+	if spacing <= 0 {
+		spacing = spm.config.Trading.PriceInterval
+	}
 
 	for i := 0; i < count; i++ {
 		var price float64
 		if direction == "down" {
 			// 向下：网格价格 - i * 间隔
-			price = gridPrice - float64(i)*priceInterval
+			price = gridPrice - float64(i)*spacing
 		} else {
 			// 向上：网格价格 + i * 间隔
-			price = gridPrice + float64(i)*priceInterval
+			price = gridPrice + float64(i)*spacing
 		}
 		// 使用检测到的价格精度进行舍入
 		price = roundPrice(price, spm.priceDecimals)
@@ -1150,8 +1192,9 @@ func (spm *SuperPositionManager) initializeSellSlotsFromPosition(totalPosition f
 
 	// 4. 计算卖单槽位价格（从锚点价格 + 价格间隔开始）
 	// 卖单最低价 = 锚点价格 + 价格间隔（避免与买单最高价冲突）
+	// 注意：初始化时使用基础PriceInterval，趋势自适应在启动后才生效
 	sellStartPrice := spm.anchorPrice + spm.config.Trading.PriceInterval
-	sellPrices := spm.calculateSlotPrices(sellStartPrice, totalSlotsNeeded, "up")
+	sellPrices := spm.calculateSlotPrices(sellStartPrice, totalSlotsNeeded, "up", spm.config.Trading.PriceInterval)
 
 	logger.Info("🔄 [持仓恢复] 从价格 %s 向上创建 %d 个槽位（前 %d 个将挂卖单）",
 		formatPrice(sellStartPrice, spm.priceDecimals), totalSlotsNeeded, sellWindowSize)
@@ -1363,13 +1406,18 @@ func (spm *SuperPositionManager) PrintPositions() {
 		return allSlots[i].Price > allSlots[j].Price
 	})
 
-	// 找到最接近当前价格的网格价格
-	currentGridPrice := spm.findNearestGridPrice(lastPrice)
-	logger.Info("当前网格价格: %s", formatPrice(currentGridPrice, spm.priceDecimals))
+	// 找到最接近当前价格的网格价格（使用有效买入间距，趋势自适应生效时动态变化）
+	trendMults := spm.getTrendParams()
+	effectiveBuySpacing := spm.config.Trading.PriceInterval * trendMults.BuySpacing
+	currentGridPrice := spm.findNearestGridPrice(lastPrice, effectiveBuySpacing)
+	logger.Info("当前网格价格: %s (有效间距: %.4f, 间距乘数: %.2f)", formatPrice(currentGridPrice, spm.priceDecimals), effectiveBuySpacing, trendMults.BuySpacing)
 
 	// 计算买单窗口范围（当前网格价格下方的买单窗口）
-	buyWindowSize := spm.config.Trading.BuyWindowSize
-	buyWindowPrices := spm.calculateSlotPrices(currentGridPrice, buyWindowSize, "down")
+	effectiveBuyWindow := int(float64(spm.config.Trading.BuyWindowSize) * trendMults.BuyWindow)
+	if effectiveBuyWindow < 1 {
+		effectiveBuyWindow = 1
+	}
+	buyWindowPrices := spm.calculateSlotPrices(currentGridPrice, effectiveBuyWindow, "down", effectiveBuySpacing)
 
 	// 创建价格查找表
 	buyWindowPriceMap := make(map[string]bool)
@@ -1378,7 +1426,8 @@ func (spm *SuperPositionManager) PrintPositions() {
 	}
 
 	// 打印买单窗口内的所有槽位
-	logger.Info("买单窗口大小: %d 个槽位 (当前网格价格下方)", buyWindowSize)
+	logger.Info("买单窗口大小: %d 个槽位 (当前网格价格下方, 有效窗口: %d, 窗口乘数: %.2f)",
+		spm.config.Trading.BuyWindowSize, effectiveBuyWindow, trendMults.BuyWindow)
 	buyOrderCount := 0
 	emptySlotCount := 0
 	filledSlotCount := 0

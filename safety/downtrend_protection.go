@@ -97,24 +97,26 @@ func (d *DowntrendProtection) SetFilledPositionCount(count int) {
 }
 
 // Start 启动下跌趋势保护
+// 注意：即使 disabled，也会启动K线流和EMA计算（用于趋势自适应网格）
 func (d *DowntrendProtection) Start(ctx context.Context) {
-	if !d.cfg.DowntrendProtection.Enabled {
-		logger.Info("⚠️ 下跌趋势保护未启用")
-		return
+	protoEnabled := d.cfg.DowntrendProtection.Enabled
+
+	if protoEnabled {
+		logger.Info("📉 启动下跌趋势保护 (周期: %s, EMA: %d/%d, 跌幅阈值: %.1f%%, 稳定K线: %d)",
+			d.cfg.DowntrendProtection.CandleInterval,
+			d.cfg.DowntrendProtection.EMAShort,
+			d.cfg.DowntrendProtection.EMALong,
+			d.cfg.DowntrendProtection.DropThresholdPercent,
+			d.cfg.DowntrendProtection.StabilizeCandles)
+
+		if d.cfg.DowntrendProtection.MaxFilledPositions > 0 {
+			logger.Info("📉 最大持仓限制: %d 个槽位", d.cfg.DowntrendProtection.MaxFilledPositions)
+		}
+	} else {
+		logger.Info("ℹ️ 下跌趋势保护未启用（但EMA计算仍在运行，用于趋势自适应网格）")
 	}
 
-	logger.Info("📉 启动下跌趋势保护 (周期: %s, EMA: %d/%d, 跌幅阈值: %.1f%%, 稳定K线: %d)",
-		d.cfg.DowntrendProtection.CandleInterval,
-		d.cfg.DowntrendProtection.EMAShort,
-		d.cfg.DowntrendProtection.EMALong,
-		d.cfg.DowntrendProtection.DropThresholdPercent,
-		d.cfg.DowntrendProtection.StabilizeCandles)
-
-	if d.cfg.DowntrendProtection.MaxFilledPositions > 0 {
-		logger.Info("📉 最大持仓限制: %d 个槽位", d.cfg.DowntrendProtection.MaxFilledPositions)
-	}
-
-	// 预加载历史K线数据
+	// 预加载历史K线数据（即使disabled也需要，用于EMA初始化）
 	logger.Info("📊 正在加载 %s 历史K线数据...", d.symbol)
 	requiredCandles := d.cfg.DowntrendProtection.EMALong + d.cfg.DowntrendProtection.StabilizeCandles + 10
 	candles, err := d.exchange.GetHistoricalKlines(ctx, d.symbol, d.cfg.DowntrendProtection.CandleInterval, requiredCandles)
@@ -133,17 +135,20 @@ func (d *DowntrendProtection) Start(ctx context.Context) {
 		d.initializeRecentHigh()
 	}
 
-	// 启动K线流（只监控交易币种）
+	// 启动K线流（即使disabled也需要，用于EMA实时更新）
 	symbols := []string{d.symbol}
 	if err := d.exchange.StartKlineStream(ctx, symbols, d.cfg.DowntrendProtection.CandleInterval, d.onCandleUpdate); err != nil {
 		logger.Error("❌ 启动下跌趋势保护K线流失败: %v", err)
 		return
 	}
 
-	// 启动定期报告
-	go d.reportLoop(ctx)
-
-	logger.Info("✅ 下跌趋势保护已启动")
+	// 只在启用时启动定期报告和状态机
+	if protoEnabled {
+		go d.reportLoop(ctx)
+		logger.Info("✅ 下跌趋势保护已启动")
+	} else {
+		logger.Info("✅ EMA趋势计算已启动（下跌趋势保护未启用）")
+	}
 }
 
 // initializeEMA 初始化EMA值
@@ -227,13 +232,15 @@ func (d *DowntrendProtection) onCandleUpdate(candle *exchange.Candle) {
 	// 更新K线缓存
 	d.updateCandles(candle)
 
-	// 更新EMA
+	// 更新EMA（始终需要，用于趋势自适应网格）
 	if candle.IsClosed {
 		d.updateEMA(candle.Close)
 	}
 
-	// 检查趋势状态
-	d.checkTrend(candle)
+	// 检查趋势状态（仅在下跌保护启用时执行状态机逻辑）
+	if d.cfg.DowntrendProtection.Enabled {
+		d.checkTrend(candle)
+	}
 }
 
 // updateCandles 更新K线缓存
@@ -589,6 +596,34 @@ func (d *DowntrendProtection) ForceResetToActive(newPrice float64) {
 // GetEMAValues 获取EMA值（用于调试）
 func (d *DowntrendProtection) GetEMAValues() (emaShort, emaLong float64) {
 	return d.emaShort, d.emaLong
+}
+
+// GetTrendStrength 返回当前趋势强度 [-1, 1]
+//   - 正值 = 上涨趋势（短EMA > 长EMA）
+//   - 负值 = 下跌趋势（短EMA < 长EMA）
+//   - 0   = 无明显趋势（短EMA ≈ 长EMA）
+// 该值用于趋势自适应网格间距，动态调整网格密度和交易策略
+func (d *DowntrendProtection) GetTrendStrength() float64 {
+	d.stateMu.RLock()
+	defer d.stateMu.RUnlock()
+
+	if d.emaLong == 0 {
+		return 0
+	}
+
+	// EMA差值百分比
+	diff := (d.emaShort - d.emaLong) / d.emaLong
+	// 归一化到 [-1, 1]，±2% 为全量
+	// 即: 短EMA比长EMA高2%以上 -> +1 (强上涨)
+	//     短EMA比长EMA低2%以上 -> -1 (强下跌)
+	strength := diff / 0.02
+	if strength > 1 {
+		return 1
+	}
+	if strength < -1 {
+		return -1
+	}
+	return strength
 }
 
 // GetDropPercent 获取当前跌幅百分比

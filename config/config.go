@@ -57,6 +57,7 @@ type Config struct {
 		RangeThresholdPercent float64 `yaml:"range_threshold_percent"`  // 波动区间收窄阈值，默认1.5%
 		CandleInterval        string  `yaml:"candle_interval"`          // K线周期，默认"15m"
 		MaxFilledPositions    int     `yaml:"max_filled_positions"`     // 最大持仓数量限制，默认0(不限制)
+		TrendAdaptive         TrendAdaptiveConfig `yaml:"trend_adaptive"` // 趋势自适应网格配置
 	} `yaml:"downtrend_protection"`
 
 	// 时间间隔配置（单位：秒，除非特别说明）
@@ -86,6 +87,20 @@ type ExchangeConfig struct {
 	SecretKey  string  `yaml:"secret_key"`
 	Passphrase string  `yaml:"passphrase"` // Bitget 需要
 	FeeRate    float64 `yaml:"fee_rate"`   // 手续费率（例如 0.0002 表示 0.02%）
+}
+
+// TrendAdaptiveConfig 趋势自适应网格配置
+// 根据趋势强度动态调整网格参数，实现"上涨多赚，下跌少亏"
+type TrendAdaptiveConfig struct {
+	Enabled             bool    `yaml:"enabled"`               // 是否启用，默认true
+	BuySpacingMultMin   float64 `yaml:"buy_spacing_mult_min"`  // 最小买入间距乘数(上涨时)，默认0.7
+	BuySpacingMultMax   float64 `yaml:"buy_spacing_mult_max"`  // 最大买入间距乘数(下跌时)，默认1.3
+	SellTargetMultMin   float64 `yaml:"sell_target_mult_min"`  // 最小卖出利润乘数(下跌时)，默认0.8
+	SellTargetMultMax   float64 `yaml:"sell_target_mult_max"`  // 最大卖出利润乘数(上涨时)，默认1.2
+	BuyWindowMultMin    float64 `yaml:"buy_window_mult_min"`   // 最小买入窗口乘数(下跌时)，默认0.6
+	BuyWindowMultMax    float64 `yaml:"buy_window_mult_max"`   // 最大买入窗口乘数(上涨时)，默认1.4
+	SellWindowMultMin   float64 `yaml:"sell_window_mult_min"`  // 最小卖出窗口乘数(上涨时)，默认0.8
+	SellWindowMultMax   float64 `yaml:"sell_window_mult_max"`  // 最大卖出窗口乘数(下跌时)，默认1.2
 }
 
 // LoadConfig 加载配置文件
@@ -235,6 +250,34 @@ func (c *Config) Validate() error {
 		c.DowntrendProtection.CandleInterval = "15m" // 默认15分钟
 	}
 	// MaxFilledPositions 默认为0，表示不限制
+
+	// 验证趋势自适应网格配置并设置默认值
+	ta := &c.DowntrendProtection.TrendAdaptive
+	ta.Enabled = true // 默认启用
+	if ta.BuySpacingMultMin <= 0 {
+		ta.BuySpacingMultMin = 0.7
+	}
+	if ta.BuySpacingMultMax <= 0 {
+		ta.BuySpacingMultMax = 1.3
+	}
+	if ta.SellTargetMultMin <= 0 {
+		ta.SellTargetMultMin = 0.8
+	}
+	if ta.SellTargetMultMax <= 0 {
+		ta.SellTargetMultMax = 1.2
+	}
+	if ta.BuyWindowMultMin <= 0 {
+		ta.BuyWindowMultMin = 0.6
+	}
+	if ta.BuyWindowMultMax <= 0 {
+		ta.BuyWindowMultMax = 1.4
+	}
+	if ta.SellWindowMultMin <= 0 {
+		ta.SellWindowMultMin = 0.8
+	}
+	if ta.SellWindowMultMax <= 0 {
+		ta.SellWindowMultMax = 1.2
+	}
 
 	return nil
 }
